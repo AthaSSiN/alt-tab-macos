@@ -194,6 +194,24 @@ func makeKeyWindow(_ psn: inout ProcessSerialNumber, _ wid: CGWindowID) {
     SLPSPostEventRecordTo(&psn, &bytes)
 }
 
+/// #5985: a FULL off-content click (down + up), like yabai/Hammerspoon. Unlike `makeKeyWindow` (down only,
+/// which makes the window key but does not complete a click), the up completes the click, which is what makes
+/// a fullscreen app's menu bar activate after a cross-Space switch. Aimed far off-content so no control is hit
+/// — but note this re-opens the #5381 concern for apps that sanitize the off-content point to a real control.
+func clickKeyWindowOffContent(_ psn: inout ProcessSerialNumber, _ wid: CGWindowID) {
+    for eventType in [MakeKeyWindowEvent.leftMouseDown, UInt8(0x02)] { // down, then up (kCGEventLeftMouseUp)
+        var wid = wid
+        var point = MakeKeyWindowEvent.offContentPoint
+        var bytes = [UInt8](repeating: 0, count: MakeKeyWindowEvent.bufferSize)
+        bytes[MakeKeyWindowEvent.lengthOffset] = MakeKeyWindowEvent.recordLength
+        bytes[MakeKeyWindowEvent.unknownFlagOffset] = MakeKeyWindowEvent.unknownFlagValue
+        memcpy(&bytes[MakeKeyWindowEvent.windowIdOffset], &wid, MemoryLayout<CGWindowID>.size)
+        memcpy(&bytes[MakeKeyWindowEvent.windowLocationOffset], &point, MemoryLayout<CGPoint>.size)
+        bytes[MakeKeyWindowEvent.eventTypeOffset] = eventType
+        SLPSPostEventRecordTo(&psn, &bytes)
+    }
+}
+
 // MARK: - WindowServer notification tap (see WindowServerEvents.swift)
 //
 // SkyLight's notify-proc stream lets us learn about window lifecycle / geometry / Space changes straight

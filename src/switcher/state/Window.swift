@@ -428,6 +428,24 @@ class Window {
         makeKeyAndRaise(generation, &psn)
         restoreOriginSpaceFront(originSpaceId, originFrontPid)
         repairIfSuperseded(generation)
+        // #5985: a cross-Space target (a fullscreen app, or a window on another desktop) is fronted while macOS
+        // is still animating the Space switch, so makeKeyWindow's synthetic mouse-down lands before the window
+        // is on the active Space and is lost: the app is fronted but the window never becomes key, and a
+        // fullscreen app's menu bar (which needs a COMPLETE click) never activates. Once the Space has settled,
+        // re-assert the front process and post a full off-content click so the window becomes key AND the menu
+        // bar follows. Gated to cross-Space targets, so same-Space focus (already correct) is untouched.
+        // KNOWN LIMITATIONS (see the #5985 writeup): the fixed delay should be driven by the Space-change event
+        // instead, and the full click re-opens the #5381 concern for apps that sanitize the off-content point.
+        if let wid = cgWindowId, !self.spaceIds.isEmpty, !self.spaceIds.contains(originSpaceId) {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + .milliseconds(450)) { [weak self] in
+                guard let self, FocusIntents.shared.mayProceed(generation) else { return }
+                var psn2 = ProcessSerialNumber()
+                GetProcessForPID(self.application.pid, &psn2)
+                _SLPSSetFrontProcessWithOptions(&psn2, wid, SLPSMode.userGenerated.rawValue)
+                clickKeyWindowOffContent(&psn2, wid)
+                if let element = self.axUiElement { _ = element.raiseWindow() }
+            }
+        }
         guard FocusIntents.shared.mayProceed(generation) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) {
             WindowThumbnails.previewSelectedIfNeeded()

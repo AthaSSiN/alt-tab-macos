@@ -1,0 +1,73 @@
+name: build-test-app
+
+# Build-only workflow for testing a branch WITHOUT the release secrets. It signs the app with a
+# throwaway self-signed "Local Self-Signed" identity (provided as repo secrets) so the resulting
+# AltTab.app has a STABLE code signature that macOS Accessibility can attach to (an ad-hoc build
+# cannot hold Accessibility on macOS 26). Produces a downloadable, ready-signed AltTab.app.
+# Triggered on fix/** pushes and manually. Does not touch the release pipeline (ci_cd.yml, master).
+
+on:
+  push:
+    branches:
+      - 'fix/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo xcode-select -s /Applications/Xcode_26.0.1.app/Contents/Developer
+
+      - name: Import the self-signed signing identity into a temp keychain
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PW: ${{ secrets.MACOS_CERT_PW }}
+        run: |
+          set -eu
+          echo "$CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KPW="ci-temp-pw"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          security find-identity -p codesigning "$KEYCHAIN"
+
+      - name: Inject a version so CFBundleVersion is non-nil (App.swift:15 force-unwraps it)
+        run: |
+          cat > config/local.xcconfig <<'EOF'
+          CURRENT_PROJECT_VERSION = fix-5985
+          APPCENTER_SECRET =
+          DOMAIN =
+          API_DOMAIN =
+          EOF
+
+      - name: Build AltTab (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project alt-tab-macos.xcodeproj -scheme Debug -configuration Debug \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Sign with the stable Local Self-Signed identity
+        run: |
+          set -eu
+          APP="$(find DerivedData/Build/Products -maxdepth 2 -name 'AltTab.app' | head -1)"
+          echo "signing: $APP"
+          codesign --force --deep --sign "Local Self-Signed" \
+            --entitlements alt_tab_macos.entitlements \
+            --keychain "$RUNNER_TEMP/build.keychain-db" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Authority|Identifier|flags" || true
+          /usr/bin/ditto -c -k --keepParent "$APP" AltTab-fix.zip
+          ls -la AltTab-fix.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AltTab-fix-signed
+          path: AltTab-fix.zip
+          if-no-files-found: error
